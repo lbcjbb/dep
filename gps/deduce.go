@@ -62,8 +62,9 @@ func validateVCSScheme(scheme, typ string) bool {
 var (
 	// This regex allows some usernames that github currently disallows. They
 	// have allowed them in the past.
-	ghRegex      = regexp.MustCompile(`^(?P<root>github\.com(/[A-Za-z0-9][-A-Za-z0-9]*/[A-Za-z0-9_.\-]+))((?:/[A-Za-z0-9_.\-]+)*)$`)
-	gpinNewRegex = regexp.MustCompile(`^(?P<root>gopkg\.in(?:(/[a-zA-Z0-9][-a-zA-Z0-9]+)?)(/[a-zA-Z][-.a-zA-Z0-9]*)\.((?:v0|v[1-9][0-9]*)(?:\.0|\.[1-9][0-9]*){0,2}(?:-unstable)?)(?:\.git)?)((?:/[a-zA-Z0-9][-.a-zA-Z0-9]*)*)$`)
+	ghRegex          = regexp.MustCompile(`^(?P<root>github\.com(/[A-Za-z0-9][-A-Za-z0-9]*/[A-Za-z0-9_.\-]+))((?:/[A-Za-z0-9_.\-]+)*)$`)
+	ghSchibstedRegex = regexp.MustCompile(`^(?P<root>github\.schibsted\.io(/[A-Za-z0-9][-A-Za-z0-9]*/[A-Za-z0-9_.\-]+))((?:/[A-Za-z0-9_.\-]+)*)$`)
+	gpinNewRegex     = regexp.MustCompile(`^(?P<root>gopkg\.in(?:(/[a-zA-Z0-9][-a-zA-Z0-9]+)?)(/[a-zA-Z][-.a-zA-Z0-9]*)\.((?:v0|v[1-9][0-9]*)(?:\.0|\.[1-9][0-9]*){0,2}(?:-unstable)?)(?:\.git)?)((?:/[a-zA-Z0-9][-.a-zA-Z0-9]*)*)$`)
 	//gpinOldRegex = regexp.MustCompile(`^(?P<root>gopkg\.in/(?:([a-z0-9][-a-z0-9]+)/)?((?:v0|v[1-9][0-9]*)(?:\.0|\.[1-9][0-9]*){0,2}(-unstable)?)/([a-zA-Z][-a-zA-Z0-9]*)(?:\.git)?)((?:/[a-zA-Z][-a-zA-Z0-9]*)*)$`)
 	bbRegex = regexp.MustCompile(`^(?P<root>bitbucket\.org(?P<bitname>/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+))((?:/[A-Za-z0-9_.\-]+)*)$`)
 	//lpRegex = regexp.MustCompile(`^(?P<root>launchpad\.net/([A-Za-z0-9-._]+)(/[A-Za-z0-9-._]+)?)(/.+)?`)
@@ -86,6 +87,7 @@ func pathDeducerTrie() *deducerTrie {
 	dxt := newDeducerTrie()
 
 	dxt.Insert("github.com/", githubDeducer{regexp: ghRegex})
+	dxt.Insert("github.schibsted.io/", githubSchibstedDeducer{regexp: ghSchibstedRegex})
 	dxt.Insert("gopkg.in/", gopkginDeducer{regexp: gpinNewRegex})
 	dxt.Insert("bitbucket.org/", bitbucketDeducer{regexp: bbRegex})
 	dxt.Insert("launchpad.net/", launchpadDeducer{regexp: lpRegex})
@@ -127,6 +129,53 @@ func (m githubDeducer) deduceSource(path string, u *url.URL) (maybeSources, erro
 	}
 
 	u.Host = "github.com"
+	u.Path = v[2]
+
+	if u.Scheme == "ssh" && u.User != nil && u.User.Username() != "git" {
+		return nil, fmt.Errorf("github ssh must be accessed via the 'git' user; %s was provided", u.User.Username())
+	} else if u.Scheme != "" {
+		if !validateVCSScheme(u.Scheme, "git") {
+			return nil, fmt.Errorf("%s is not a valid scheme for accessing a git repository", u.Scheme)
+		}
+		if u.Scheme == "ssh" {
+			u.User = url.User("git")
+		}
+		return maybeSources{maybeGitSource{url: u}}, nil
+	}
+
+	mb := make(maybeSources, len(gitSchemes))
+	for k, scheme := range gitSchemes {
+		u2 := *u
+		if scheme == "ssh" {
+			u2.User = url.User("git")
+		}
+		u2.Scheme = scheme
+		mb[k] = maybeGitSource{url: &u2}
+	}
+
+	return mb, nil
+}
+
+type githubSchibstedDeducer struct {
+	regexp *regexp.Regexp
+}
+
+func (m githubSchibstedDeducer) deduceRoot(path string) (string, error) {
+	v := m.regexp.FindStringSubmatch(path)
+	if v == nil {
+		return "", fmt.Errorf("%s is not a valid path for a source on github.schibsted.io", path)
+	}
+
+	return "github.schibsted.io" + v[2], nil
+}
+
+func (m githubSchibstedDeducer) deduceSource(path string, u *url.URL) (maybeSources, error) {
+	v := m.regexp.FindStringSubmatch(path)
+	if v == nil {
+		return nil, fmt.Errorf("%s is not a valid path for a source on github.schibsted.io", path)
+	}
+
+	u.Host = "github.schibsted.io"
 	u.Path = v[2]
 
 	if u.Scheme == "ssh" && u.User != nil && u.User.Username() != "git" {
